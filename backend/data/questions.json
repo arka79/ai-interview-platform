@@ -1,0 +1,16 @@
+{
+  "Backend Developer": {
+    "Easy": [
+      "What is Express.js?",
+      "What is middleware?"
+    ],
+    "Medium": [
+      "Explain event loop in Node.js",
+      "How JWT authentication works?",
+      "What is the difference between process.nextTick() and setImmediate()?",
+      "How do you handle errors in Express.js?",
+      "What is the difference between synchronous and asynchronous code in Node.js?"
+    ]
+  }
+}
+

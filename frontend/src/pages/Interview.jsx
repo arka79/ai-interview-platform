@@ -8,6 +8,7 @@ function Interview() {
   const [timeLeft, setTimeLeft] = useState(900); // 15 minutes
   const [loading, setLoading] = useState(true);
   const [result, setResult] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [isListening, setIsListening] = useState(false);
 
@@ -15,25 +16,31 @@ function Interview() {
   const hasSubmitted = useRef(false);
   const recognitionRef = useRef(null);
 
-  // Fetch Questions
-  useEffect(() => {
-    const fetchQuestions = async () => {
-      try {
-        const res = await API.post("/interview/start", {
-          role: "Backend Developer",
-          difficulty: "Medium",
-        });
-        setQuestions(res.data?.questions || []);
-      } catch (err) {
-        console.error("Failed to fetch questions:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchQuestions();
-  }, []);
+  /* ===============================
+     FETCH QUESTIONS
+  =============================== */
 
-  // Timer
+
+useEffect(() => {
+  const fetchQuestions = async () => {
+    const res = await API.post("/interview/start", {
+      role: "Backend Developer",
+      difficulty: "Medium",
+    });
+
+    setQuestions(res.data.questions);
+   setSessionId(res.data.sessionId);
+   setLoading(false);
+
+  };
+
+  fetchQuestions();
+}, []);
+
+
+  /* ===============================
+     TIMER
+  =============================== */
   useEffect(() => {
     if (loading || result) return;
 
@@ -51,11 +58,17 @@ function Interview() {
     return () => clearInterval(timerRef.current);
   }, [loading, result]);
 
-  // Voice Recognition
+  /* ===============================
+     VOICE RECOGNITION
+  =============================== */
   useEffect(() => {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
+
+    if (!SpeechRecognition) {
+      console.warn("Speech Recognition not supported");
+      return;
+    }
 
     const recognition = new SpeechRecognition();
     recognition.continuous = true;
@@ -64,12 +77,18 @@ function Interview() {
 
     recognition.onresult = (event) => {
       let transcript = "";
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
         transcript += event.results[i][0].transcript;
       }
 
       const questionId = questions[currentIndex]?.id || currentIndex;
-      setAnswers((prev) => ({ ...prev, [questionId]: transcript }));
+
+      // ✅ Append instead of overwrite
+      setAnswers((prev) => ({
+        ...prev,
+        [questionId]: (prev[questionId] || "") + transcript,
+      }));
     };
 
     recognition.onend = () => setIsListening(false);
@@ -91,47 +110,80 @@ function Interview() {
     }
   };
 
+  /* ===============================
+     FORMAT TIMER
+  =============================== */
   const formatTime = () => {
     const minutes = Math.floor(timeLeft / 60);
     const seconds = timeLeft % 60;
     return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
   };
 
+  /* ===============================
+     HANDLE ANSWER CHANGE
+  =============================== */
   const handleAnswerChange = (value) => {
     const questionId = questions[currentIndex]?.id || currentIndex;
-    setAnswers((prev) => ({ ...prev, [questionId]: value }));
+
+    setAnswers((prev) => ({
+      ...prev,
+      [questionId]: value,
+    }));
   };
 
+  /* ===============================
+     SUBMIT ALL
+  =============================== */
   const handleSubmitAll = async () => {
-    if (hasSubmitted.current) return;
+  if (hasSubmitted.current || submitting) return;
 
-    try {
-      hasSubmitted.current = true;
-      setSubmitting(true);
-      const res = await API.post("/interview/submit", { answers });
-      setResult(res.data);
-    } catch (err) {
-      console.error("Submission failed:", err);
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  try {
+    stopListening(); // stop mic before submit
+    hasSubmitted.current = true;
+    setSubmitting(true);
 
-  if (loading)
+    // ✅ Convert answers object → structured array
+    const formattedAnswers = questions.map((q) => ({
+      question: q.question,
+      answer: answers[q.id] || "",
+    }));
+
+    const res = await API.post("/interview/submit", {
+      sessionId,
+      answers: formattedAnswers,
+    });
+
+    setResult(res.data);
+
+  } catch (err) {
+    console.error("Submission failed:", err);
+  } finally {
+    setSubmitting(false);
+  }
+};
+
+
+  /* ===============================
+     RENDER STATES
+  =============================== */
+
+  if (loading) {
     return (
       <div className="exam-container">
         <h2>Loading questions...</h2>
       </div>
     );
+  }
 
-  if (questions.length === 0)
+  if (questions.length === 0) {
     return (
       <div className="exam-container">
         <h2>No questions available.</h2>
       </div>
     );
+  }
 
-  if (result)
+  if (result) {
     return (
       <div className="exam-container">
         <h2>Interview Completed</h2>
@@ -140,22 +192,21 @@ function Interview() {
         {result.details?.map((item, index) => (
           <div key={index} className="card">
             <h4>Question {index + 1}</h4>
-            <p>
-              <strong>Score:</strong> {item.score}/10
-            </p>
-            <p>
-              <strong>Feedback:</strong> {item.feedback}
-            </p>
-            <p>
-              <strong>Improvements:</strong> {item.improvements}
-            </p>
+            <p><strong>Score:</strong> {item.score}/10</p>
+            <p><strong>Feedback:</strong> {item.feedback}</p>
+            <p><strong>Improvements:</strong> {item.improvements}</p>
           </div>
         ))}
       </div>
     );
+  }
 
   const currentQuestion = questions[currentIndex];
   const questionId = currentQuestion?.id || currentIndex;
+
+  /* ===============================
+     MAIN UI
+  =============================== */
 
   return (
     <div className="exam-container">
@@ -200,7 +251,10 @@ function Interview() {
       <div className="exam-footer">
         <button
           disabled={currentIndex === 0}
-          onClick={() => setCurrentIndex((prev) => prev - 1)}
+          onClick={() => {
+            stopListening();
+            setCurrentIndex((prev) => prev - 1);
+          }}
         >
           Previous
         </button>
@@ -211,11 +265,12 @@ function Interview() {
           </button>
         ) : (
           <button
-            onClick={() =>
+            onClick={() => {
+              stopListening();
               setCurrentIndex((prev) =>
                 prev < questions.length - 1 ? prev + 1 : prev
-              )
-            }
+              );
+            }}
           >
             Next
           </button>

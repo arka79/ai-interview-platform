@@ -9,33 +9,26 @@ function Dashboard() {
     best: 0,
   });
 
-  useEffect(() => {
-    const fetchMetrics = async () => {
-      try {
-        const res = await API.get("/interview/history");
+ useEffect(() => {
+  const fetchMetrics = async () => {
+    try {
+      const res = await API.get("/dashboard");
 
-        const questions = res.data?.questions || [];
+      setMetrics({
+        total: res.data.total_interviews,
+        average: res.data.average_score,
+        best: res.data.best_score,
+        completion: res.data.completion_rate,
+      });
+    } catch (err) {
+      console.error("Dashboard error:", err);
+    }
+  };
 
-        const total = res.data?.total_interviews || 0;
-        const average = res.data?.average_score || 0;
+  fetchMetrics();
+}, []);
 
-        const best =
-          questions.length > 0
-            ? Math.max(...questions.map((q) => q.score || 0))
-            : 0;
 
-        setMetrics({
-          total,
-          average,
-          best,
-        });
-      } catch (err) {
-        console.error("Dashboard error:", err);
-      }
-    };
-
-    fetchMetrics();
-  }, []);
 
   return (
     <Layout>

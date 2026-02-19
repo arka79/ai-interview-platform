@@ -1,163 +1,218 @@
+const fs = require("fs");
+const path = require("path");
 const sql = require("../db");
-const { generateQuestion, evaluateAnswer } = require("../services/aiService");
-
-/* ==========================================
-   START INTERVIEW (Generate 5 Questions)
-========================================== */
+const { evaluateAnswer } = require("../services/aiService"); 
+/* =====================================
+   START INTERVIEW
+===================================== */
 
 const startInterview = async (req, res) => {
-  const { role, difficulty } = req.body;
-  const userId = req.user.id;
-
   try {
-    // Create session
+    const userId = req.user?.id;
+    const { role, difficulty } = req.body;
+
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    if (!role || !difficulty) {
+      return res.status(400).json({
+        message: "Role and difficulty are required",
+      });
+    }
+
+    const filePath = path.join(__dirname, "../data/questions.json");
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(500).json({
+        message: "Questions file not found",
+      });
+    }
+
+    const rawData = fs.readFileSync(filePath, "utf-8");
+    const data = JSON.parse(rawData);
+
+    if (!data[role] || !data[role][difficulty]) {
+      return res.status(404).json({
+        message: "No questions found",
+      });
+    }
+
+    const questions = data[role][difficulty].map((q, index) => ({
+      id: index + 1,
+      question: q,
+    }));
+
     const session = await sql`
-      INSERT INTO interview_sessions (user_id, role, difficulty)
-      VALUES (${userId}, ${role}, ${difficulty})
-      RETURNING *
+      INSERT INTO interview_sessions (user_id, role, difficulty, total_questions)
+      VALUES (${userId}, ${role}, ${difficulty}, ${questions.length})
+      RETURNING id
     `;
 
-    const sessionId = session[0].id;
-
-    // ONE AI call → Generate 5 questions
-    const prompt = `
-You are a senior technical interviewer.
-
-Generate 5 ${difficulty} level interview questions 
-for a ${role} role.
-
-Return STRICT JSON:
-
-{
-  "questions": [
-    "Question 1",
-    "Question 2",
-    "Question 3",
-    "Question 4",
-    "Question 5"
-  ]
-}
-`;
-
-    const aiResponse = await generateQuestion(prompt);
-    const parsed = JSON.parse(aiResponse);
-
-    res.json({
-      sessionId,
-      questions: parsed.questions
+    return res.json({
+      success: true,
+      sessionId: session[0].id,
+      totalQuestions: questions.length,
+      questions,
     });
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to start interview" });
+  } catch (error) {
+    console.error("Start Interview Error:", error);
+    return res.status(500).json({
+      message: "Server error while starting interview",
+    });
   }
 };
 
 
-/* ==========================================
-   SUBMIT ENTIRE INTERVIEW (Single AI Call)
-========================================== */
+/* =====================================
+   SUBMIT INTERVIEW
+===================================== */
+// your Gemini file
 
 const submitInterview = async (req, res) => {
-  const { sessionId, questions, answers } = req.body;
-  const userId = req.user.id;
-
   try {
-    const prompt = `
-You are a senior technical interviewer.
+    const userId = req.user?.id;
+    const { answers, sessionId } = req.body;
 
-Evaluate the following interview answers.
-
-Return STRICT JSON:
-
-{
-  "averageScore": number,
-  "results": [
-    {
-      "question": "...",
-      "score": number,
-      "feedback": "...",
-      "improvements": "..."
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
     }
-  ]
-}
 
-Interview Data:
-${questions.map((q, i) => `
-Question: ${q}
-Answer: ${answers[i] || "No answer"}
-`).join("\n")}
-`;
+    if (!Array.isArray(answers) || answers.length === 0) {
+      return res.status(400).json({
+        message: "Answers must be a non-empty array",
+      });
+    }
 
-    // ONE AI call → Evaluate everything
-    const aiResponse = await evaluateAnswer(prompt);
-    const parsed = JSON.parse(aiResponse);
+    if (!sessionId) {
+      return res.status(400).json({
+        message: "Session ID required",
+      });
+    }
 
-    // Save each question result
-    for (let i = 0; i < parsed.results.length; i++) {
-      const item = parsed.results[i];
+    // 🔒 Validate session
+    const sessionCheck = await sql`
+      SELECT id, completed 
+      FROM interview_sessions
+      WHERE id = ${sessionId} AND user_id = ${userId}
+    `;
+
+    if (sessionCheck.length === 0) {
+      return res.status(403).json({ message: "Invalid session" });
+    }
+
+    if (sessionCheck[0].completed) {
+      return res.status(400).json({
+        message: "Interview already submitted",
+      });
+    }
+
+    let totalScore = 0;
+    let details = [];
+
+    // 🔥 Start transaction
+    await sql`BEGIN`;
+
+    for (let item of answers) {
+      const questionText = item.question;
+      const answerText = item.answer;
+
+      if (!questionText || !answerText) continue;
+
+      let evaluation;
+
+      // ✅ Prevent wasting AI tokens on garbage
+      if (!answerText || answerText.trim().length < 5) {
+        evaluation = {
+          score: 0,
+          feedback: "Answer is empty or meaningless.",
+          improvements: "Provide a valid technical explanation.",
+        };
+      } else {
+        evaluation = await evaluateAnswer(
+          questionText,
+          answerText
+        );
+      }
+
+      totalScore += evaluation.score;
+
+      details.push({
+        question: questionText,
+        score: evaluation.score,
+        feedback: evaluation.feedback,
+        improvements: evaluation.improvements,
+      });
 
       await sql`
         INSERT INTO interviews
         (user_id, session_id, question, answer, score, feedback, improvements)
         VALUES
-        (
-          ${userId},
-          ${sessionId},
-          ${item.question},
-          ${answers[i] || ""},
-          ${item.score},
-          ${item.feedback},
-          ${item.improvements}
-        )
+        (${userId}, ${sessionId}, ${questionText}, ${answerText},
+         ${evaluation.score}, ${evaluation.feedback}, ${evaluation.improvements})
       `;
     }
 
-    // Update session summary
+    const average =
+      details.length > 0 ? totalScore / details.length : 0;
+
     await sql`
       UPDATE interview_sessions
-      SET total_score = ${parsed.averageScore},
-          total_questions = ${parsed.results.length},
+      SET total_score = ${totalScore},
           completed = TRUE
       WHERE id = ${sessionId}
     `;
 
-    res.json(parsed);
+    await sql`COMMIT`;
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Submission failed" });
+    return res.json({
+      success: true,
+      average: Number(average.toFixed(1)),
+      totalScore,
+      details,
+    });
+
+  } catch (error) {
+    await sql`ROLLBACK`;
+    console.error("Submit Interview Error:", error);
+    return res.status(500).json({
+      message: "Server error while submitting interview",
+    });
   }
 };
 
 
-/* ==========================================
-   GET HISTORY
-========================================== */
-const getHistory = async (req, res) => {
-  const userId = req.user.id;
+/* =====================================
+   GET INTERVIEW HISTORY
+===================================== */
 
+const getHistory = async (req, res) => {
   try {
-    const questions = await sql`
-      SELECT id, question, score, feedback, improvements, created_at
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const history = await sql`
+      SELECT id, question, score, feedback, improvements
       FROM interviews
       WHERE user_id = ${userId}
-      ORDER BY created_at DESC
+      ORDER BY id DESC
     `;
 
-    res.json({
-      total_questions: questions.length,
-      questions
-    });
+    // `sql` returns an array of rows. Provide a consistent response shape.
+    return res.status(200).json({ questions: history || [] });
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Could not fetch history" });
+  } catch (error) {
+    console.error("History Error:", error);
+    res.status(500).json({ message: "Server Error" });
   }
 };
 
 module.exports = {
   startInterview,
   submitInterview,
-  getHistory
+  getHistory,
 };
